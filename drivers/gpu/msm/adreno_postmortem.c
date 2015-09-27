@@ -270,7 +270,7 @@ static bool adreno_rb_use_hex(void)
 #endif
 }
 
-static void adreno_dump_rb(struct kgsl_device *device, const void *buf,
+void adreno_dump_rb(struct kgsl_device *device, const void *buf,
 			 size_t len, int start, int size)
 {
 	const uint32_t *ptr = buf;
@@ -695,7 +695,8 @@ static int adreno_dump(struct kgsl_device *device)
 	unsigned int ts_processed = 0xdeaddead;
 	struct kgsl_context *context;
 	unsigned int context_id;
-
+	unsigned int rbbm_status;
+	
 	static struct ib_list ib_list;
 
 	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
@@ -706,10 +707,12 @@ static int adreno_dump(struct kgsl_device *device)
 
 	mb();
 
-	if (adreno_is_a2xx(adreno_dev))
-		adreno_dump_a2xx(device);
-	else if (adreno_is_a3xx(adreno_dev))
-		adreno_dump_a3xx(device);
+	if (device->pm_dump_enable) {
+		if (adreno_is_a2xx(adreno_dev))
+			adreno_dump_a2xx(device);
+		else if (adreno_is_a3xx(adreno_dev))
+			adreno_dump_a3xx(device);
+	}
 
 	pt_base = kgsl_mmu_get_current_ptbase(&device->mmu);
 	cur_pt_base = pt_base;
@@ -723,19 +726,34 @@ static int adreno_dump(struct kgsl_device *device)
 	kgsl_regread(device, REG_CP_IB1_BUFSZ, &cp_ib1_bufsz);
 	kgsl_regread(device, REG_CP_IB2_BASE, &cp_ib2_base);
 	kgsl_regread(device, REG_CP_IB2_BUFSZ, &cp_ib2_bufsz);
+	/* If postmortem dump is not enabled, dump minimal set and return */
+	if (!device->pm_dump_enable) {
+
+		KGSL_LOG_DUMP(device,
+			"STATUS %08X | IB1:%08X/%08X | IB2: %08X/%08X"
+			" | RPTR: %04X | WPTR: %04X\n",
+			rbbm_status,  cp_ib1_base, cp_ib1_bufsz, cp_ib2_base,
+			cp_ib2_bufsz, cp_rb_rptr, cp_rb_wptr);
+
+		return 0;
+	}
 
 	kgsl_sharedmem_readl(&device->memstore,
 			(unsigned int *) &context_id,
 			KGSL_MEMSTORE_OFFSET(KGSL_MEMSTORE_GLOBAL,
 				current_context));
-	context = idr_find(&device->context_idr, context_id);
+
+	context = kgsl_context_get(device, context_id);
+
 	if (context) {
 		ts_processed = kgsl_readtimestamp(device, context,
 						  KGSL_TIMESTAMP_RETIRED);
-		KGSL_LOG_DUMP(device, "CTXT: %d  TIMESTM RTRD: %08X\n",
+		KGSL_LOG_DUMP(device, "FT CTXT: %d  TIMESTM RTRD: %08X\n",
 				context->id, ts_processed);
 	} else
 		KGSL_LOG_DUMP(device, "BAD CTXT: %d\n", context_id);
+	
+		kgsl_context_put(context);
 
 	num_item = adreno_ringbuffer_count(&adreno_dev->ringbuffer,
 						cp_rb_rptr);
