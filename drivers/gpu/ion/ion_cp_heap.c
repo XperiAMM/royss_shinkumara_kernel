@@ -23,7 +23,6 @@
 #include <linux/mm.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
-#include <linux/vmalloc.h>
 #include <linux/memory_alloc.h>
 #include <linux/seq_file.h>
 #include <linux/fmem.h>
@@ -99,6 +98,7 @@ struct ion_cp_heap {
 	int iommu_2x_map_domain;
 	unsigned int has_outer_cache;
 	atomic_t protect_cnt;
+	int disallow_non_secure_allocation;
 };
 
 enum {
@@ -113,60 +113,6 @@ static int ion_cp_protect_mem(unsigned int phy_base, unsigned int size,
 static int ion_cp_unprotect_mem(unsigned int phy_base, unsigned int size,
 				unsigned int permission_type, int version,
 				void *data);
-
-/**
- * Get the total number of kernel mappings.
- * Must be called with heap->lock locked.
- */
-static unsigned long ion_cp_get_total_kmap_count(
-					const struct ion_cp_heap *cp_heap)
-{
-	return cp_heap->kmap_cached_count + cp_heap->kmap_uncached_count;
-}
-
-/**
- * Protects memory if heap is unsecured heap. Also ensures that we are in
- * the correct FMEM state if this heap is a reusable heap.
- * Must be called with heap->lock locked.
- */
-static int ion_cp_protect(struct ion_heap *heap, int version, void *data)
-{
-	struct ion_cp_heap *cp_heap =
-		container_of(heap, struct ion_cp_heap, heap);
-	int ret_value = 0;
-
-	if (atomic_inc_return(&cp_heap->protect_cnt) == 1) {
-		/* Make sure we are in C state when the heap is protected. */
-		if (cp_heap->reusable && !cp_heap->allocated_bytes) {
-			ret_value = fmem_set_state(FMEM_C_STATE);
-			if (ret_value)
-				goto out;
-		}
-
-		ret_value = ion_cp_protect_mem(cp_heap->secure_base,
-				cp_heap->secure_size, cp_heap->permission_type,
-				version, data);
-		if (ret_value) {
-			pr_err("Failed to protect memory for heap %s - "
-				"error code: %d\n", heap->name, ret_value);
-
-			if (cp_heap->reusable && !cp_heap->allocated_bytes) {
-				if (fmem_set_state(FMEM_T_STATE) != 0)
-					pr_err("%s: unable to transition heap to T-state\n",
-						__func__);
-			}
-			atomic_dec(&cp_heap->protect_cnt);
-		} else {
-			cp_heap->heap_protected = HEAP_PROTECTED;
-			pr_debug("Protected heap %s @ 0x%lx\n",
-				heap->name, cp_heap->base);
-		}
-	}
-out:
-	pr_debug("%s: protect count is %d\n", __func__,
-		atomic_read(&cp_heap->protect_cnt));
-	BUG_ON(atomic_read(&cp_heap->protect_cnt) < 0);
-	return ret_value;
 }
 
 /**
@@ -201,6 +147,7 @@ static void ion_cp_unprotect(struct ion_heap *heap, int version, void *data)
 	pr_debug("%s: protect count is %d\n", __func__,
 		atomic_read(&cp_heap->protect_cnt));
 	BUG_ON(atomic_read(&cp_heap->protect_cnt) < 0);
+	return ret_value;
 }
 
 ion_phys_addr_t ion_cp_allocate(struct ion_heap *heap,
@@ -210,6 +157,7 @@ ion_phys_addr_t ion_cp_allocate(struct ion_heap *heap,
 {
 	unsigned long offset;
 	unsigned long secure_allocation = flags & ION_SECURE;
+	unsigned long force_contig = flags & ION_FORCE_CONTIGUOUS;
 
 	struct ion_cp_heap *cp_heap =
 		container_of(heap, struct ion_cp_heap, heap);

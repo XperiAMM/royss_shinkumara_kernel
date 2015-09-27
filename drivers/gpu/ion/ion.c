@@ -231,6 +231,7 @@ static struct ion_buffer *ion_buffer_create(struct ion_heap *heap,
 
 	buffer->dev = dev;
 	buffer->size = len;
+	buffer->flags = flags;
 
 	table = buffer->heap->ops->map_dma(buffer->heap, buffer);
 	if (IS_ERR_OR_NULL(table)) {
@@ -1056,11 +1057,7 @@ int ion_handle_get_flags(struct ion_client *client, struct ion_handle *handle,
 		return -EINVAL;
 	}
 	buffer = handle->buffer;
-	mutex_lock(&buffer->lock);
-	*flags = buffer->flags;
-	mutex_unlock(&buffer->lock);
-	mutex_unlock(&client->lock);
-
+	
 	return 0;
 }
 EXPORT_SYMBOL(ion_handle_get_flags);
@@ -1386,13 +1383,14 @@ static long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		ion_free(client, data.handle);
 		break;
 	}
-	case ION_IOC_MAP:
-	case ION_IOC_SHARE:
+	case ION_IOC_ALLOC_COMPAT:
 	{
 		struct ion_fd_data data;
-		int ret;
+				
 		if (copy_from_user(&data, (void __user *)arg, sizeof(data)))
 			return -EFAULT;
+		 data.handle = ion_alloc(client, data.len, data.align,
+		 data.flags, data.flags);
 
 		ret = ion_share_set_flags(client, data.handle, filp->f_flags);
 		if (ret)
@@ -1435,8 +1433,20 @@ static long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		return dev->custom_ioctl(client, data.cmd, data.arg);
 	}
 	case ION_IOC_CLEAN_CACHES:
+		case ION_IOC_CLEAN_CACHES_COMPAT:
+ 		return client->dev->custom_ioctl(client,
+ 						ION_IOC_CLEAN_CACHES, arg);
 	case ION_IOC_INV_CACHES:
-	case ION_IOC_CLEAN_INV_CACHES:
+	case ION_IOC_INV_CACHES_COMPAT:
+ 		return client->dev->custom_ioctl(client,
+ 						ION_IOC_INV_CACHES, arg);
+	case ION_IOC_CLEAN_INV_CACHES_COMPAT:
+ 		return client->dev->custom_ioctl(client,
+ 						ION_IOC_CLEAN_INV_CACHES, arg);
+	case ION_IOC_GET_FLAGS_COMPAT:
+ 		return client->dev->custom_ioctl(client,
+ 						ION_IOC_GET_FLAGS, arg);
+ 	default:
 	{
 		struct ion_flush_data data;
 		unsigned long start, end;
@@ -1539,7 +1549,6 @@ static size_t ion_debug_heap_total(struct ion_client *client,
 	size_t size = 0;
 	struct rb_node *n;
 
-	mutex_lock(&client->lock);
 	for (n = rb_first(&client->handles); n; n = rb_next(n)) {
 		struct ion_handle *handle = rb_entry(n,
 						     struct ion_handle,
@@ -1651,8 +1660,8 @@ void ion_debug_mem_map_create(struct seq_file *s, struct ion_heap *heap,
 			data->addr = buffer->priv_phys;
 			data->addr_end = buffer->priv_phys + buffer->size-1;
 			data->size = buffer->size;
-			data->client_name = ion_debug_locate_owner(dev, buffer);
-			ion_debug_mem_map_add(mem_map, data);
+ 			data->client_name = ion_debug_locate_owner(dev, buffer);
+ 			ion_debug_mem_map_add(mem_map, data);
 		}
 	}
 }
