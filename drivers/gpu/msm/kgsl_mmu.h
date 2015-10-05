@@ -13,16 +13,17 @@
 #ifndef __KGSL_MMU_H
 #define __KGSL_MMU_H
 
+#include <mach/iommu.h>
+
 /*
  * These defines control the split between ttbr1 and ttbr0 pagetables of IOMMU
  * and what ranges of memory we map to them
  */
-#define KGSL_IOMMU_GLOBAL_MEM_BASE	0xC0000000
+#define KGSL_IOMMU_GLOBAL_MEM_BASE	0xF8000000
 #define KGSL_IOMMU_GLOBAL_MEM_SIZE	SZ_4M
 #define KGSL_IOMMU_ALIGN_MASK     (~((1 << PAGE_SHIFT) - 1))
  
-#define KGSL_MMU_ALIGN_SHIFT    13
-#define KGSL_MMU_ALIGN_MASK     (~((1 << KGSL_MMU_ALIGN_SHIFT) - 1))
+#define KGSL_MMU_ALIGN_MASK     (~((1 << PAGE_SHIFT) - 1))
 
 /* Identifier for the global page table */
 /* Per process page tables will probably pass in the thread group
@@ -114,6 +115,7 @@ struct kgsl_pagetable {
 	} stats;
 	const struct kgsl_mmu_pt_ops *pt_ops;
 	unsigned int tlb_flags;
+	unsigned int fault_addr;
 	void *priv;
 };
 
@@ -187,15 +189,20 @@ int kgsl_mmu_init(struct kgsl_device *device);
 int kgsl_mmu_start(struct kgsl_device *device);
 int kgsl_mmu_close(struct kgsl_device *device);
 int kgsl_mmu_map(struct kgsl_pagetable *pagetable,
-		 struct kgsl_memdesc *memdesc,
-		 unsigned int protflags);
+		 struct kgsl_memdesc *memdesc);
+int kgsl_mmu_get_gpuaddr(struct kgsl_pagetable *pagetable,
+		 struct kgsl_memdesc *memdesc);
 int kgsl_mmu_map_global(struct kgsl_pagetable *pagetable,
-			struct kgsl_memdesc *memdesc, unsigned int protflags);
+			struct kgsl_memdesc *memdesc);
 int kgsl_mmu_unmap(struct kgsl_pagetable *pagetable,
 		    struct kgsl_memdesc *memdesc);
+int kgsl_mmu_put_gpuaddr(struct kgsl_pagetable *pagetable,
+		 struct kgsl_memdesc *memdesc);			
 unsigned int kgsl_virtaddr_to_physaddr(void *virtaddr);
 void kgsl_setstate(struct kgsl_mmu *mmu, unsigned int context_id,
 			uint32_t flags);
+unsigned int kgsl_mmu_log_fault_addr(struct kgsl_mmu *mmu,
+			unsigned int pt_base, unsigned int addr);
 int kgsl_mmu_get_ptname_from_ptbase(unsigned int pt_base);
 int kgsl_mmu_pt_get_flags(struct kgsl_pagetable *pt,
 			enum kgsl_deviceid id);
@@ -204,7 +211,7 @@ void *kgsl_mmu_ptpool_init(int entries);
 int kgsl_mmu_enabled(void);
 void kgsl_mmu_set_mmutype(char *mmutype);
 enum kgsl_mmutype kgsl_mmu_get_mmutype(void);
-unsigned int kgsl_mmu_get_ptsize(void);
+int kgsl_mmu_gpuaddr_in_range(unsigned int gpuaddr);
 
 /*
  * Static inline functions of MMU that simply call the SMMU specific
@@ -301,6 +308,77 @@ static inline unsigned int kgsl_mmu_get_int_mask(void)
 	else
 		return (MH_INTERRUPT_MASK__AXI_READ_ERROR |
 			MH_INTERRUPT_MASK__AXI_WRITE_ERROR);
+}
+/*
+ * kgsl_mmu_is_perprocess() - Runtime check for per-process
+* pagetables.
+ *
+ * Returns non-zero if per-process pagetables are enabled,
+ * 0 if not.
+ */
+#ifdef CONFIG_KGSL_PER_PROCESS_PAGE_TABLE
+static inline int kgsl_mmu_is_perprocess(void)
+{
+	/* We presently do not support per-process for IOMMU-v2 */
+	return (kgsl_mmu_get_mmutype() != KGSL_MMU_TYPE_IOMMU)
+		|| msm_soc_version_supports_iommu_v1();
+}
+#else
+tatic inline int kgsl_mmu_is_perprocess(void)
+{
+	return 0;
+}
+#endif
+
+/*
+ * kgsl_mmu_base_addr() - Get gpu virtual address base.
+*
+ * Returns the start address of the allocatable gpu
+ * virtual address space. Other mappings that mirror
+ * the CPU address space are possible outside this range.
+ */
+static inline unsigned int kgsl_mmu_get_base_addr(void)
+{
+	if (KGSL_MMU_TYPE_GPU == kgsl_mmu_get_mmutype()
+		|| !kgsl_mmu_is_perprocess())
+		return KGSL_PAGETABLE_BASE;
+	/*
+	 * This is the start of the kernel address
+	 * space, so allocations from this range will
+	 * never conflict with userpace addresses
+	 */
+	return PAGE_OFFSET;
+}
+/*
+ * kgsl_mmu_get_ptsize() - Get gpu pagetable size
+ *
+ * Returns the usable size of the gpu allocatable
+ * address space.
+ */
+static inline unsigned int kgsl_mmu_get_ptsize(void)
+
+	/*
+	 * For IOMMU per-process pagetables, the allocatable range
+	 * and the kernel global range must both be outside
+	 * the userspace address range. There is a 1Mb gap
+	 * between these address ranges to make overrun
+	 * detection easier.
+	 * For the shared pagetable case use 2GB and because
+ * mirroring the CPU address space is not possible and
+	 * we're better off with extra room.
+	 */
+	enum kgsl_mmutype mmu_type = kgsl_mmu_get_mmutype();
+
+	if (KGSL_MMU_TYPE_GPU == mmu_type)
+		return CONFIG_MSM_KGSL_PAGE_TABLE_SIZE;
+	else if (KGSL_MMU_TYPE_IOMMU == mmu_type) {
+		if (kgsl_mmu_is_perprocess())
+			return KGSL_IOMMU_GLOBAL_MEM_BASE
+				- kgsl_mmu_get_base_addr() - SZ_1M;
+	else
+			return SZ_2G;
+	}
+	return 0;
 }
 
 #endif /* __KGSL_MMU_H */
