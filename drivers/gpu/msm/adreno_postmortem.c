@@ -714,6 +714,8 @@ static int adreno_dump(struct kgsl_device *device)
 			adreno_dump_a3xx(device);
 	}
 
+	kgsl_regread(device, adreno_dev->gpudev->reg_rbbm_status, &rbbm_status);
+
 	pt_base = kgsl_mmu_get_current_ptbase(&device->mmu);
 	cur_pt_base = pt_base;
 
